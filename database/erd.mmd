@@ -1,0 +1,130 @@
+erDiagram
+
+    institutions {
+        char(36)    id              PK
+        varchar     name
+        varchar     primary_color
+        varchar     secondary_color
+        varchar     logo_url
+        tinyint     data_terms_accepted
+        datetime    data_terms_accepted_at
+        char(36)    data_terms_accepted_by  FK
+        datetime    created_at
+        datetime    updated_at
+    }
+
+    users {
+        char(36)    id              PK
+        varchar     username
+        varchar     password_hash
+        varchar     full_name
+        enum        role
+        enum        sub_role
+        varchar     photo_url
+        char(36)    institution_id  FK
+        char(36)    course_id       FK
+        tinyint     is_active
+        datetime    created_at
+        datetime    updated_at
+    }
+
+    access_tokens {
+        char(36)    id              PK
+        varchar     token
+        varchar     institution_name
+        char(36)    institution_id  FK
+        tinyint     used
+        datetime    used_at
+        char(36)    used_by
+        char(36)    created_by      FK
+        datetime    expires_at
+        datetime    created_at
+    }
+
+    courses {
+        char(36)    id              PK
+        varchar     name
+        varchar     grade
+        varchar     group
+        char(36)    institution_id  FK
+        char(36)    teacher_id      FK
+        datetime    created_at
+    }
+
+    subjects {
+        char(36)    id              PK
+        varchar     name
+        varchar     base_type
+        char(36)    institution_id  FK
+        char(36)    course_id
+        datetime    created_at
+    }
+
+    students {
+        char(36)    id              PK
+        varchar     full_name
+        varchar     photo_url
+        char(36)    course_id       FK
+        char(36)    institution_id  FK
+        char(36)    created_by_id   FK
+        datetime    created_at
+        datetime    updated_at
+    }
+
+    exams {
+        char(36)    id              PK
+        varchar     name
+        char(36)    course_id       FK
+        char(36)    subject_id      FK
+        char(36)    teacher_id      FK
+        char(36)    institution_id  FK
+        datetime    created_at
+        datetime    updated_at
+    }
+
+    exam_results {
+        char(36)    id              PK
+        char(36)    exam_id         FK
+        char(36)    student_id      FK
+        text        image_urls
+        longtext    ocr_raw_text
+        longtext    problems_json
+        decimal     final_score
+        varchar     grade_color
+        text        teacher_notes
+        enum        status
+        datetime    created_at
+        datetime    updated_at
+    }
+
+    support_messages {
+        char(36)    id              PK
+        char(36)    from_user_id    FK
+        varchar     from_username
+        varchar     from_role
+        char(36)    institution_id  FK
+        text        message
+        tinyint     read
+        datetime    created_at
+    }
+
+    institutions ||--o{ users             : "tiene"
+    institutions ||--o{ courses           : "tiene"
+    institutions ||--o{ subjects          : "tiene"
+    institutions ||--o{ students          : "tiene"
+    institutions ||--o{ exams             : "tiene"
+    institutions ||--o{ support_messages  : "recibe"
+    institutions ||--o{ access_tokens     : "activada_por"
+
+    users ||--o{ students          : "crea"
+    users ||--o{ exams             : "crea"
+    users ||--o{ support_messages  : "envía"
+    users ||--o{ access_tokens     : "genera"
+
+    courses ||--o{ students        : "tiene"
+    courses ||--o{ exams           : "tiene"
+
+    subjects ||--o{ exams          : "clasifica"
+
+    exams ||--o{ exam_results      : "genera"
+    students ||--o{ exam_results   : "tiene"

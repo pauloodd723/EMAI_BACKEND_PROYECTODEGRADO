@@ -1,0 +1,71 @@
+# ─── Entorno virtual ──────────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ─── Variables de entorno (nunca subir) ───────────────────────────────────────
+.env
+.env.local
+.env.production
+.env.*.local
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ─── Base de datos local ──────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── Archivos temporales de OCR / uploads ────────────────────────────────────
+uploads/
+tmp/
+temp/
+*.tmp
+
+# ─── Editores e IDEs ──────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── macOS ────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ─── Windows ──────────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ─── Pytest / coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ─── mypy / pyright ───────────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+pyrightconfig.json
+
+# ─── Jupyter ──────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
