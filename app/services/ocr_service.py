@@ -1,34 +1,34 @@
 """
-ocr_service.py — EMAI-APP v5
-
-Estrategia principal:
-- Preprocesamiento: aumentar brillo/contraste para resaltar tinta negra
-- Parser basado en '=' como ancla de problemas matemáticos
-- Detecta secciones (A)(B)(C) y puntos 1. 2. 3.
-- Evalúa la expresión izquierda del = y compara con la respuesta derecha
+ocr_service.py — EMAI-APP v7
+- Solo EasyOCR (elimina dependencia de Tesseract)
+- Flash: umbral 160, doble dilatación para + y -
+- Sin flash: CLAHE para sombras
+- Parser basado en '=' como ancla
 """
 
 import base64
+
 import io
 import re
 import uuid
-from fractions import Fraction
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
 
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 
 try:
-    import pytesseract
-    OCR_AVAILABLE = True
+    import easyocr
+    EASYOCR_AVAILABLE = True
 except ImportError:
-    OCR_AVAILABLE = False
+    EASYOCR_AVAILABLE = False
 
-import os
-_TESS = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-if OCR_AVAILABLE and os.path.exists(_TESS):
-    pytesseract.pytesseract.tesseract_cmd = _TESS
+_easyocr_reader = None
+def _get_easyocr():
+    global _easyocr_reader
+    if _easyocr_reader is None and EASYOCR_AVAILABLE:
+        _easyocr_reader = easyocr.Reader(['es', 'en'], gpu=False, verbose=False)
+    return _easyocr_reader
 
-# ─── PEDAGOGÍA ────────────────────────────────────────────────────────────────
 PEDAGOGIA: Dict[str, List[str]] = {
     "+":         ["🔢 Usa la recta numérica para visualizar la suma.", "🧮 Practica agrupando objetos concretos.", "🎯 Completa: 3+__=7."],
     "-":         ["🔢 Tacha lo que se quita para visualizar la resta.", "🧮 Usa la recta numérica hacia la izquierda.", "🎯 ¿Cuánto falta para llegar a 10?"],
@@ -49,35 +49,6 @@ PEDAGOGIA: Dict[str, List[str]] = {
 }
 
 
-# ─── PREPROCESAMIENTO ────────────────────────────────────────────────────────
-def _preprocess(img: Image.Image) -> Image.Image:
-    """
-    Preprocesamiento optimizado para exámenes de papel con fondo gris.
-    Estrategia ganadora: brightness 1.5 + threshold fijo 150.
-    Probada contra imagen real del examen — score máximo.
-    """
-    try:
-        img = ImageOps.exif_transpose(img)
-    except Exception:
-        pass
-
-    # Escalar a 2400px de ancho
-    w, h = img.size
-    if w < 2400:
-        img = img.resize((2400, int(h * 2400 / w)), Image.LANCZOS)
-
-    # Convertir a escala de grises
-    gray = img.convert("L")
-
-    # 1. Subir brillo para aclarar el fondo gris del papel
-    gray = ImageEnhance.Brightness(gray).enhance(1.5)
-
-    # 2. Threshold fijo 150: separa tinta negra (< 150) del fondo (>= 150)
-    gray = gray.point(lambda x: 0 if x < 150 else 255)
-
-    return gray
-
-
 def decode_base64_image(b64: str) -> Image.Image:
     if "," in b64:
         b64 = b64.split(",")[1]
@@ -85,42 +56,52 @@ def decode_base64_image(b64: str) -> Image.Image:
     return Image.open(io.BytesIO(base64.b64decode(b64)))
 
 
-def extract_text_from_images(b64_images: List[str]) -> str:
-    if not b64_images:
-        return ""
-    if not OCR_AVAILABLE:
-        return _demo_text()
+def _normalize_vf(text: str) -> str:
+    """
+    Normaliza líneas de V/F:
+    - '?' → '>' cuando está entre números (OCR confunde > con ?)
+    - Líneas que terminan en '=' sin respuesta → marcar como incompletas
+    - Normaliza variantes de V y F
+    """
+    def _fix_token(tok: str) -> str:
+        tok = tok.strip()
+        if tok in ("v", "u", "U", "\\/", "VV", "W", "w", "V"):
+            return "V"
+        if tok in ("f", "E", "P", "T", "F"):
+            return "F"
+        if re.match(r"^[VvuUwW]+[.,]?$", tok):
+            return "V"
+        if re.match(r"^[FfEPT]+[.,]?$", tok):
+            return "F"
+        if tok.lower() == "verdadero":
+            return "V"
+        if tok.lower() == "falso":
+            return "F"
+        return tok
 
-    parts = []
-    for i, b64 in enumerate(b64_images):
-        try:
-            img = decode_base64_image(b64)
-            processed = _preprocess(img)
+    fixed_lines = []
+    for line in text.split("\n"):
+        # ? entre números → > (OCR confunde el signo mayor que)
+        line = re.sub(r"(\d)\s*\?\s*(\d)", r"\1 > \2", line)
 
-            best, best_score = "", -1
-            # PSM 6 = bloque uniforme (mejor para exámenes)
-            # PSM 4 = columna variable
-            for psm in [6, 4]:
-                try:
-                    t = pytesseract.image_to_string(
-                        processed, lang="spa+eng",
-                        config=f"--oem 3 --psm {psm}"
-                    )
-                    s = _score_text(t)
-                    if s > best_score:
-                        best_score, best = s, t
-                except Exception:
-                    pass
+        # Activar normalización si hay patrón de desigualdad
+        if re.search(r"[><]\s*\d|[><].*=|\d\s*=\s*\d.*=", line):
+            # Normalizar V/F al final
+            line = re.sub(
+                r"([=:\-]\s*)([A-Za-z\\/]{1,9})\s*$",
+                lambda m: m.group(1) + _fix_token(m.group(2)),
+                line
+            )
+            # Línea que termina en "= " sin respuesta (V desapareció por flash)
+            # Dejarla sin ? para que INEQ_NO_ANS_RE la capture limpiamente
+            if re.search(r"[><=]\s*\d+\s*=\s*$", line):
+                line = line.rstrip().rstrip("=").rstrip()
 
-            parts.append(f"=== PÁGINA {i+1} ===\n{_clean_text(best)}")
-        except Exception as e:
-            parts.append(f"=== PÁGINA {i+1} (error: {e}) ===")
-
-    return "\n\n".join(parts)
+        fixed_lines.append(line)
+    return "\n".join(fixed_lines)
 
 
 def _score_text(text: str) -> int:
-    """Más líneas con = y números = mejor OCR."""
     score = 0
     for line in text.split("\n"):
         l = line.strip()
@@ -130,11 +111,12 @@ def _score_text(text: str) -> int:
             score += 2
         elif re.search(r"[a-zA-ZáéíóúÁÉÍÓÚ]{3,}", l):
             score += 1
+        if re.search(r"[><]\s*\d.*[=:]\s*[VFvf]", l):
+            score += 3
     return score
 
 
 def _clean_text(text: str) -> str:
-    """Limpieza mínima: solo quitar basura obvia, preservar todo lo matemático."""
     lines, result, prev_empty = text.split("\n"), [], False
     for line in lines:
         s = line.strip()
@@ -143,18 +125,141 @@ def _clean_text(text: str) -> str:
                 result.append("")
             prev_empty = True
             continue
-        # Quitar líneas que son casi puro ruido (< 20% alfanumérico)
         alnum = sum(1 for c in s if c.isalnum())
         if len(s) > 5 and alnum < len(s) * 0.20:
             continue
-        # Normalizar símbolos
         s = (s.replace("—", "-").replace("–", "-")
               .replace("×", "*").replace("÷", "/")
               .replace("\u00d7", "*").replace("\u00f7", "/"))
+        s = re.sub(r"(\d),(\d)", r"\1.\2", s)
         s = re.sub(r" {2,}", " ", s)
         result.append(s)
         prev_empty = False
     return "\n".join(result)
+
+
+def _easyocr_to_text(results: list) -> str:
+    if not results:
+        return ""
+    results = [(bbox, text.strip(), conf) for bbox, text, conf in results
+               if text.strip() and conf > 0.10]
+    if not results:
+        return ""
+
+    def center_y(r): return (r[0][0][1] + r[0][2][1]) / 2
+    def center_x(r): return (r[0][0][0] + r[0][2][0]) / 2
+    def height(r):   return abs(r[0][2][1] - r[0][0][1])
+
+def _easyocr_to_text(results: list) -> str:
+    if not results:
+        return ""
+    results = [(bbox, text.strip(), conf) for bbox, text, conf in results
+               if text.strip() and conf > 0.10]
+    if not results:
+        return ""
+
+    def center_y(r): return (r[0][0][1] + r[0][2][1]) / 2
+    def center_x(r): return (r[0][0][0] + r[0][2][0]) / 2
+    def height(r):   return abs(r[0][2][1] - r[0][0][1])
+
+    sorted_r = sorted(results, key=center_y)
+    lines_groups, current_group = [], [sorted_r[0]]
+
+    for item in sorted_r[1:]:
+        # Comparar con el último elemento del grupo (ventana deslizante)
+        # pero usar la altura del item más grande para el umbral
+        prev = current_group[-1]
+        max_h = max(height(prev), height(item))
+        # Umbral conservador: 0.8x altura — solo agrupa si están muy cerca en Y
+        # Esto evita que líneas de diferentes filas se mezclen
+        if abs(center_y(item) - center_y(prev)) < max_h * 0.8:
+            current_group.append(item)
+        else:
+            lines_groups.append(current_group)
+            current_group = [item]
+    lines_groups.append(current_group)
+
+    final_lines = []
+    for group in lines_groups:
+        group_sorted = sorted(group, key=center_x)
+        line_text = " ".join(text for _, text, _ in group_sorted).strip()
+        line_text = re.sub(r"^(\d{1,2})\.\s+(\d)", r"\1. \2", line_text)
+        line_text = re.sub(r"\s*[×xX]\s*", " x ", line_text)
+        line_text = re.sub(r"\s*÷\s*", " / ", line_text)
+        line_text = re.sub(r"\s*=\s*", " = ", line_text)
+        line_text = re.sub(r"\s*\+\s*", " + ", line_text)
+        line_text = re.sub(r"[—–]", "-", line_text)
+        line_text = re.sub(r"(\d)\s*-\s*(\d)", r"\1 - \2", line_text)
+        line_text = re.sub(r"\s+-\s+", " - ", line_text)
+        line_text = re.sub(r"(\d)\s{2,}/\s{2,}(\d)", r"\1/\2", line_text)
+        # Unir dígitos separados por espacio simple: "8 3" → "83", "4 1" → "41"
+        # Solo cuando son dígitos solos sin operador alrededor
+        line_text = re.sub(r"(?<![+\-*/=<>])\b(\d)\s(\d)\b(?![+\-*/=<>])", r"\1\2", line_text)
+        # Si hay operación sin = seguida de número: "5/6 - 1/3 1/2" → "5/6 - 1/3 = 1/2"
+        line_text = re.sub(
+            r"([\d/]+\s*[-+*/]\s*[\d/]+)\s+([\d/]+)\s*$",
+            r"\1 = \2",
+            line_text
+        )
+        # Normalizar V/F al final
+        line_text = re.sub(r"=\s*([vVfF])\s*$", lambda m: "= " + m.group(1).upper(), line_text)
+        line_text = re.sub(r"\s{2,}", " ", line_text).strip()
+        if line_text:
+            final_lines.append(line_text)
+    return "\n".join(final_lines)
+
+
+def _process_single_image(b64: str, index: int) -> str:
+    try:
+        img = decode_base64_image(b64)
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+
+        reader = _get_easyocr()
+        if reader is None:
+            return f"=== PÁGINA {index+1} ===\n{_demo_text()}"
+
+        # Escalar a máx 1200px para no agotar RAM
+        w, h = img.size
+        if w > 1200:
+            img = img.resize((1200, int(h * 1200 / w)), Image.LANCZOS)
+
+        # Preprocesamiento MÍNIMO — EasyOCR maneja mejor la imagen original
+        # Solo un leve sharpen para definir bordes sin destruir trazos finos
+        gray = img.convert("L")
+        gray = ImageEnhance.Sharpness(gray).enhance(2.0)
+
+        buf = io.BytesIO()
+        gray.save(buf, format="JPEG", quality=95)
+
+        results = reader.readtext(buf.getvalue())
+        text = _easyocr_to_text(results)
+        text = _normalize_vf(text)
+
+        return f"=== PÁGINA {index+1} ===\n{_clean_text(text)}"
+    except Exception as e:
+        return f"=== PÁGINA {index+1} (error: {e}) ==="
+
+
+def extract_text_from_images(b64_images: List[str]) -> str:
+    if not b64_images:
+        return ""
+    _get_easyocr()
+    results_map: Dict[int, str] = {}
+    with ThreadPoolExecutor(max_workers=min(len(b64_images), 3)) as executor:
+        futures = {
+            executor.submit(_process_single_image, b64, i): i
+            for i, b64 in enumerate(b64_images)
+        }
+        for future in as_completed(futures):
+            i = futures[future]
+            try:
+                results_map[i] = future.result()
+            except Exception as e:
+                results_map[i] = f"=== PÁGINA {i+1} (error: {e}) ==="
+    return "\n\n".join(results_map[i] for i in sorted(results_map))
 
 
 def _demo_text() -> str:
@@ -164,33 +269,22 @@ Operaciones básicas (A)
 2. 92 - 47 = 41
 3. 7 x 8 = 56
 4. 56 / 7 = 8
-Menor, Igual o Mayor que (D)
-5 > 3 = V
-4 < 2 = F
-Jerarquía (E)
-(2 + 3) x 4 = 20
-10 - (2 + 3) = 5
-Fracciones (F)
-1/2 + 1/4 = 3/4
-Decimales
-0.5 + 0.25 = 0.75
 """
 
 
-# ─── EVALUADOR MATEMÁTICO ─────────────────────────────────────────────────────
 def _safe_eval(expr: str) -> Optional[float]:
-    """Evalúa expresión matemática de forma segura."""
     try:
         c = (expr.strip()
-             .replace(",", ".").replace("÷", "/").replace("×", "*")
-             .replace("x", "*").replace("X", "*")
-             .replace("²", "**2").replace("³", "**3").replace(" ", ""))
+             .replace(",", ".")
+             .replace("÷", "/").replace("×", "*")
+             .replace("²", "**2").replace("³", "**3"))
+        c = re.sub(r"(?<=\d)\s*[xX]\s*(?=\d)", "*", c)
+        c = c.replace(" ", "")
         c = re.sub(r"(\d)\(", r"\1*(", c)
         c = re.sub(r"\)(\d)", r")*\1", c)
-        # Solo permitir caracteres matemáticos
         if re.search(r"[a-wyzA-WYZ_]", c):
             return None
-        return float(eval(c, {"__builtins__": {}}, {}))  # noqa: S307
+        return float(eval(c, {"__builtins__": {}}, {}))
     except Exception:
         return None
 
@@ -199,93 +293,64 @@ def _cn(s: str) -> str:
     return s.replace(",", ".").replace(" ", "").strip() if s else ""
 
 
-def _factors(n: int) -> List[int]:
-    f, d = [], 2
-    while d * d <= n:
-        while n % d == 0:
-            f.append(d); n //= d
-        d += 1
-    if n > 1:
-        f.append(n)
-    return f
-
-
 def _frac_str(val: float) -> str:
-    """Convierte float a string legible: entero si es entero, decimal si no."""
     if val == int(val):
         return str(int(val))
-    # Para decimales simples mostrar decimal, no fracción
-    decimal_str = f"{val:.4f}".rstrip("0").rstrip(".")
-    # Solo mostrar fracción si es muy simple (denominador ≤ 10)
-    try:
-        fr = Fraction(val).limit_denominator(10)
-        if abs(float(fr) - val) < 0.001 and fr.denominator <= 10:
-            return f"{fr.numerator}/{fr.denominator}"
-    except Exception:
-        pass
-    return decimal_str
+    SIMPLE = {0.5: "1/2", 0.333: "1/3", 0.667: "2/3", 0.25: "1/4", 0.75: "3/4"}
+    for ref, fstr in SIMPLE.items():
+        if abs(val - ref) < 0.005:
+            return fstr
+    return f"{val:.2f}".rstrip("0").rstrip(".")
 
 
-# ─── PARSER PRINCIPAL ─────────────────────────────────────────────────────────
 def detect_math_problems(ocr_text: str) -> List[Dict[str, Any]]:
-    """
-    Estrategia basada en '=' como ancla.
-    
-    Para cada línea que contiene '=':
-    1. Separar en LADO_IZQUIERDO = LADO_DERECHO
-    2. Intentar evaluar el lado izquierdo matemáticamente
-    3. Comparar el resultado con lo que escribió el estudiante (lado derecho)
-    4. Casos especiales: desigualdades V/F, medidas con unidades
-    
-    Para secciones: detectar (A), (B), (C)... al inicio de línea.
-    Para puntos: detectar "1.", "2.", etc. al inicio de línea.
-    """
     lines = ocr_text.split("\n")
     results: List[Dict[str, Any]] = []
     seen: set = set()
-
     current_section = "General"
-    text_buffer = ""    # Acumula texto del problema antes del =
-    current_point = ""  # "Punto 1", "Punto 2", etc.
+    text_buffer = ""
+    current_point = ""
 
-    # ── Patrones ──────────────────────────────────────────────────────────────
-    # Sección: "Operaciones básicas (A)" o línea que termina en (A)-(Z)
     SECTION_RE = re.compile(
-        r"^(.*?)\(([A-Z])\)\s*$|"          # "Texto (A)"
-        r"^\(([A-Z])\)$|"                   # solo "(A)"
-        r"^(A\.|B\.|C\.|D\.|E\.|F\.|G\.)\s",  # "A. Texto"
+        r"^(.*?)\(([A-Z])\)\s*$|^\(([A-Z])\)$|^(A\.|B\.|C\.|D\.|E\.|F\.|G\.)\s", re.I
+    )
+    INEQ_VF_RE = re.compile(
+        # Acepta también ? como respuesta (cuando V desapareció por flash)
+        r"(\d+\.?\d*)\s*([><=≥≤?]={0,1})\s*(\d+\.?\d*)\s*[=:\-]\s*"
+        r"(V|F|v|f|u|U|w|W|E|P|T|\?|Verdadero|Falso|verdadero|falso)\b",
         re.I
     )
-
-    # Punto numerado al inicio: "1." o "1)"
-    POINT_RE = re.compile(r"^\s*(\d{1,2})[.)]\s+(.*)$")
-
-    # Línea con = (ancla principal)
-    HAS_EQ = re.compile(r"=")
-
-    # Desigualdad V/F: "5 > 3 = V" o "4 < 2 = F"
-    INEQ_VF_RE = re.compile(
-        r"(\d+\.?\d*)\s*([><=])\s*(\d+\.?\d*)\s*[=:]\s*([VFvf])\b", re.I
+    # Detectar línea de comparación sin respuesta: "5 > 3" o "5 > 3 =" (V desapareció)
+    INEQ_NO_ANS_RE = re.compile(
+        r"^(\d+\.?\d*)\s*([><=]={0,1})\s*(\d+\.?\d*)\s*$"
     )
-
-    # Medida con unidad: "1.2 x 100 = 120 cm" o "350 / 100 = 3.5 m"
+    VF_NORM = {
+        "v": "V", "u": "V", "U": "V", "w": "V", "W": "V",
+        "f": "F", "E": "F", "P": "F", "T": "F",
+        "verdadero": "V", "Verdadero": "V", "VERDADERO": "V",
+        "falso": "F", "Falso": "F", "FALSO": "F",
+        "?": "?",
+    }
     UNIT_RE = re.compile(
         r"([\d.,]+)\s*[xX×*/÷]\s*([\d.,]+)\s*=\s*([\d.,]+)\s*"
-        r"(km|hm|dam|dm|cm|mm|m\b|kg|g|mg|ml|litros?|l\b)",
-        re.I
+        r"(km|hm|dam|dm|cm|mm|m\b|kg|g|mg|ml|litros?|l\b)", re.I
     )
-
-    # Fracción en expresión: "1/2 + 3/4 = ..."
-    FRAC_EXPR_RE = re.compile(r"\d+/\d+")
-
-    # Potencia: "2² = 4" o "3^2 = 9"
+    FRAC_RE  = re.compile(r"\d+/\d+")
     POWER_RE = re.compile(r"(\d+)\s*([²³\^])\s*(\d*)\s*=\s*([\d.,]+)?")
+    SQRT_RE  = re.compile(r"√\s*(\d+)\s*=\s*([\d.,]+)?")
 
-    # Raíz: "√25 = 5"
-    SQRT_RE = re.compile(r"√\s*(\d+)\s*=\s*([\d.,]+)?")
+    def _strip_enum(s: str) -> str:
+        m = re.match(r"^(\d{1,2})\.\s+(.+)$", s)
+        if m:
+            return m.group(2).strip()
+        m = re.match(r"^(\d{1,2})\)\s+(.+)$", s)
+        if m:
+            return m.group(2).strip()
+        return s
 
     def add(data: Dict) -> None:
         op = (data.get("operation") or "").strip()
+        op = _strip_enum(op)
         key = re.sub(r"\s+", "", op)[:50]
         if key and key not in seen and len(op) >= 2:
             seen.add(key)
@@ -297,208 +362,215 @@ def detect_math_problems(ocr_text: str) -> List[Dict[str, Any]]:
                 **{k: v for k, v in data.items() if k != "originalText"},
             })
 
+    def _normalize_line(line: str) -> str:
+        line = _strip_enum(line)
+        line = line.replace("—", " - ").replace("–", " - ").replace("‐", " - ")
+        line = re.sub(r"(\d)\s*-\s*(\d)", r"\1 - \2", line)
+        line = re.sub(r"\s*[×÷]\s*", lambda m: " * " if "×" in m.group() else " / ", line)
+        # Dos fracciones juntas sin operador entre ellas: "5/6 1/3" 
+        # EasyOCR a veces no detecta el - entre fracciones.
+        # No podemos inferir el operador, así que dejamos pasar al core
+        # que probará ambas interpretaciones.
+        line = re.sub(r"\s{2,}", " ", line).strip()
+        return line
+
     for raw in lines:
         line = raw.strip()
-
-        # Saltar separadores de página
         if not line or line.startswith("==="):
             if not line:
                 text_buffer = ""
                 current_point = ""
             continue
 
-        # ── 1. DETECTAR SECCIÓN ───────────────────────────────────────────────
-        sec_m = SECTION_RE.match(line)
-        if sec_m and "=" not in line and len(line) < 100:
-            # Verificar que no sea una operación matemática disfrazada
-            if not re.search(r"\d\s*[+\-*/]\s*\d", line):
-                current_section = line.rstrip(":").strip()
+        line_clean = _strip_enum(line)
+        sec_m = SECTION_RE.match(line_clean)
+        if sec_m and "=" not in line_clean and len(line_clean) < 100:
+            if not re.search(r"\d\s*[+\-*/]\s*\d", line_clean):
+                current_section = line_clean.rstrip(":").strip()
                 text_buffer = ""
                 current_point = ""
                 continue
 
-        # ── 2. DETECTAR PUNTO NUMERADO ────────────────────────────────────────
-        pt_m = POINT_RE.match(line)
-        if pt_m:
-            current_point = f"Punto {pt_m.group(1)}"
-            rest = pt_m.group(2).strip()
-            if "=" in rest and re.search(r"\d", rest):
-                line = rest  # Procesar el resto como operación
-            else:
-                text_buffer = rest  # Es texto del enunciado
-                continue
+        line = _normalize_line(line)
+        original_line = line
 
-        # ── SOLO PROCESAR LÍNEAS QUE TIENEN = ────────────────────────────────
         if "=" not in line:
-            # Acumular como contexto textual
+            # Excepción: comparaciones puras "5 > 3" o "4 < 2" (sin respuesta)
+            m = INEQ_NO_ANS_RE.match(line.strip())
+            if m:
+                left, op_sign, right = m.group(1), m.group(2), m.group(3)
+                try:
+                    v1, v2 = float(left), float(right)
+                    if op_sign == ">":    truth = v1 > v2
+                    elif op_sign == ">=": truth = v1 >= v2
+                    elif op_sign == "<":  truth = v1 < v2
+                    elif op_sign == "<=": truth = v1 <= v2
+                    else:                 truth = abs(v1 - v2) < 0.01
+                    expected = "V" if truth else "F"
+                    add({"originalText": original_line, "operation": f"{left} {op_sign} {right}",
+                         "studentAnswer": "-", "correctAnswer": expected,
+                         "isCorrect": None, "type": "inequality", "subType": "VF"})
+                except Exception: pass
+                text_buffer = ""; continue
             if len(line) > 4 and re.search(r"[a-zA-ZáéíóúÁÉÍÓÚ]", line):
                 text_buffer += line + " "
             continue
 
-        original_line = line
-
-        # ── 3. RAÍCES: √25 = 5 ───────────────────────────────────────────────
         m = SQRT_RE.search(line)
         if m:
-            radicand = float(m.group(1))
-            student = m.group(2)
-            correct = radicand ** 0.5
-            cs = _frac_str(correct)
+            radicand = float(m.group(1)); student = m.group(2)
+            correct = radicand ** 0.5; cs = _frac_str(correct)
             ok = False
             if student:
                 try: ok = abs(float(_cn(student)) - correct) < 0.05
                 except Exception: pass
-            add({"originalText": original_line,
-                 "operation": f"√{int(radicand)}",
+            add({"originalText": original_line, "operation": f"√{int(radicand)}",
                  "studentAnswer": student or "-", "correctAnswer": cs,
                  "isCorrect": ok, "type": "sqrt", "subType": "RAIZ"})
             text_buffer = ""; continue
 
-        # ── 4. POTENCIAS: 2² = 4 ─────────────────────────────────────────────
         m = POWER_RE.search(line)
         if m and re.search(r"[²³\^]", line):
-            base = float(m.group(1))
-            sym = m.group(2)
+            base = float(m.group(1)); sym = m.group(2)
             exp = 2 if sym == "²" else 3 if sym == "³" else float(m.group(3) or 2)
-            correct = base ** exp
-            cs = _frac_str(correct)
+            correct = base ** exp; cs = _frac_str(correct)
             student = m.group(4) or line.split("=")[-1].strip()
             ok = False
             try: ok = abs(float(_cn(student)) - correct) < 0.05
             except Exception: pass
-            add({"originalText": original_line,
-                 "operation": f"{int(base)}{sym}{m.group(3) or ''}",
+            add({"originalText": original_line, "operation": f"{int(base)}{sym}",
                  "studentAnswer": student or "-", "correctAnswer": cs,
                  "isCorrect": ok, "type": "power", "subType": "POTENCIA"})
             text_buffer = ""; continue
 
-        # ── 5. DESIGUALDAD V/F: 5 > 3 = V ────────────────────────────────────
         m = INEQ_VF_RE.search(line)
         if m:
-            left, op, right, student = m.group(1), m.group(2), m.group(3), m.group(4)
+            left = m.group(1); op_sign = m.group(2)
+            right = m.group(3); raw_ans = m.group(4).strip()
+            # Limpiar op_sign: ? → > (OCR confunde > con ?)
+            op_sign = op_sign.replace("?", ">")
+            student = VF_NORM.get(raw_ans, VF_NORM.get(raw_ans.lower(), "?"))
             try:
                 v1, v2 = float(left), float(right)
-                truth = (v1 > v2 if op == ">" else v1 < v2 if op == "<" else abs(v1-v2) < 0.01)
+                op_norm = op_sign.replace("≥", ">=").replace("≤", "<=")
+                if op_norm == ">":    truth = v1 > v2
+                elif op_norm == ">=": truth = v1 >= v2
+                elif op_norm == "<":  truth = v1 < v2
+                elif op_norm == "<=": truth = v1 <= v2
+                else:                 truth = abs(v1 - v2) < 0.01
                 expected = "V" if truth else "F"
-                add({"originalText": original_line,
-                     "operation": f"{left} {op} {right}",
-                     "studentAnswer": student.upper(), "correctAnswer": expected,
-                     "isCorrect": student.upper() == expected,
-                     "type": "inequality", "subType": op})
+                # Si respuesta es ? (V desapareció por flash), marcar como sin respuesta
+                is_correct = None if student == "?" else student == expected
+                add({"originalText": original_line, "operation": f"{left} {op_sign} {right}",
+                     "studentAnswer": student if student != "?" else "-",
+                     "correctAnswer": expected,
+                     "isCorrect": is_correct,
+                     "type": "inequality", "subType": "VF"})
             except Exception: pass
             text_buffer = ""; continue
 
-        # ── 6. MEDIDAS CON UNIDAD: 1.2 x 100 = 120 cm ───────────────────────
+        # Línea de comparación sin respuesta: "5 > 3 =" (V desapareció por flash)
+        m = INEQ_NO_ANS_RE.match(line.strip())
+        if m:
+            left, op_sign, right = m.group(1), m.group(2), m.group(3)
+            try:
+                v1, v2 = float(left), float(right)
+                if op_sign == ">":    truth = v1 > v2
+                elif op_sign == ">=": truth = v1 >= v2
+                elif op_sign == "<":  truth = v1 < v2
+                elif op_sign == "<=": truth = v1 <= v2
+                else:                 truth = abs(v1 - v2) < 0.01
+                expected = "V" if truth else "F"
+                add({"originalText": original_line, "operation": f"{left} {op_sign} {right}",
+                     "studentAnswer": "-", "correctAnswer": expected,
+                     "isCorrect": None,
+                     "type": "inequality", "subType": "VF"})
+            except Exception: pass
+            text_buffer = ""; continue
+
         m = UNIT_RE.search(line)
         if m:
-            v1, v2 = float(_cn(m.group(1))), float(_cn(m.group(2)))
-            student, unit = _cn(m.group(3)), m.group(4)
-            correct = v1 * v2
-            cs = _frac_str(correct)
+            v1 = float(_cn(m.group(1))); v2 = float(_cn(m.group(2)))
+            student = _cn(m.group(3)); unit = m.group(4)
+            correct = v1 * v2; cs = _frac_str(correct)
             ok = False
             try: ok = abs(float(student) - correct) < 0.1
             except Exception: pass
-            add({"originalText": original_line,
-                 "operation": f"{m.group(1)} × {m.group(2)}",
-                 "studentAnswer": f"{student} {unit}",
-                 "correctAnswer": f"{cs} {unit}",
+            add({"originalText": original_line, "operation": f"{m.group(1)} × {m.group(2)}",
+                 "studentAnswer": f"{student} {unit}", "correctAnswer": f"{cs} {unit}",
                  "isCorrect": ok, "type": "units", "subType": "UNIDADES"})
             text_buffer = ""; continue
 
-        # ── 7. CORE: EXPRESIÓN MATEMÁTICA con = ──────────────────────────────
-        # Cuando hay múltiples = (ej: "12.5+3.75= 12.5+3.75=17:17")
-        # buscar el par más simple: expresión corta = número limpio
-        
         parts_eq = line.split("=")
         if len(parts_eq) < 2:
             continue
 
         parsed = False
-
-        # Intentar TODOS los splits posibles, preferir el que tenga:
-        # 1. Lado izquierdo evaluable
-        # 2. Lado derecho que sea un número limpio
-        # Probamos de izquierda a derecha (primer = ganador)
         for split_idx in range(1, len(parts_eq)):
-            left_str = "=".join(parts_eq[:split_idx]).strip()
+            left_str  = "=".join(parts_eq[:split_idx]).strip()
             right_str = parts_eq[split_idx].strip()
-
-            # Ignorar lados izquierdos muy largos o con mucho texto
             if len(left_str) > 60:
                 continue
-
-            # Limpiar el lado derecho: tomar solo el primer número/fracción
-            # Acepta: "83", "42 : 42 manzanas" → 42, "17:17" → 17, "84, luego..." → 84
             right_num_m = re.match(r"^([\d.,/]+)", right_str.replace(" ", ""))
             if not right_num_m:
-                # Intento alternativo: primer número en el lado derecho
                 right_num_m = re.search(r"([\d]+\.?[\d]*)", right_str)
                 if not right_num_m:
                     continue
             student_str = right_num_m.group(1).strip().rstrip(",")
+            student_val = _safe_eval(_cn(student_str).replace(":", "/").rstrip(","))
 
-            # Preparar expresión para evaluar — limpiar ruido OCR
-            expr_clean = (
-                left_str
-                .replace("÷", "/").replace("×", "*")
-                .replace("x", "*").replace("X", "*")
-                .replace("~", "-").replace("—", "-")  # OCR confunde ~ con -
-                .replace("²", "**2").replace("³", "**3")
-                .replace(" ", "")
-            )
-            # Limpiar letras sueltas que el OCR agrega (ej: "454+3g" → intentar limpiar)
-            expr_clean = re.sub(r"[a-zA-Z]", "", expr_clean)
-            expr_clean = re.sub(r"(\d)\(", r"\1*(", expr_clean)
-            expr_clean = re.sub(r"\)(\d)", r")*\1", expr_clean)
-            # Limpiar operadores dobles
-            expr_clean = re.sub(r"[+\-*/]{2,}", lambda m: m.group()[0], expr_clean)
+            # Generar variantes: caso normal + fracciones sin operador
+            left_variants = [left_str]
+            if re.search(r"\d/\d+\s+\d+/\d", left_str) and not re.search(r"[+\-]", left_str):
+                left_variants.append(re.sub(r"(\d/\d+)\s+(\d+/\d)", r"\1 - \2", left_str))
+                left_variants.append(re.sub(r"(\d/\d+)\s+(\d+/\d)", r"\1 + \2", left_str))
 
-            correct_val = _safe_eval(expr_clean)
-            if correct_val is None:
+            # Evaluar todas las variantes, quedarse con la que coincide con el estudiante
+            # Si ninguna coincide, usar la primera que evalúe correctamente
+            best_lv = None
+            best_val = None
+            for lv in left_variants:
+                ec = (lv.replace("÷","/").replace("×","*").replace("x","*").replace("X","*")
+                      .replace("~","-").replace("—","-").replace("²","**2").replace("³","**3")
+                      .replace(" ",""))
+                ec = re.sub(r"[a-zA-Z]", "", ec)
+                ec = re.sub(r"(\d)\(", r"\1*(", ec)
+                ec = re.sub(r"\)(\d)", r")*\1", ec)
+                ec = re.sub(r"([+\-*/])\1+", r"\1", ec)
+                val = _safe_eval(ec)
+                if val is None or abs(val) > 1_000_000:
+                    continue
+                if best_val is None:
+                    best_lv, best_val = lv, val
+                # Preferir variante que coincide con respuesta del estudiante
+                if student_val is not None and abs(student_val - val) < 0.05:
+                    best_lv, best_val = lv, val
+                    break
+
+            if best_val is None:
                 continue
 
-            # Rechazar si el resultado correcto es absurdo (muy grande o negativo raro)
-            if abs(correct_val) > 1_000_000:
-                continue
-
+            left_str = best_lv
+            correct_val = best_val
             cs = _frac_str(correct_val)
+            is_correct = student_val is not None and abs(student_val - correct_val) < 0.05
 
-            # Evaluar respuesta del estudiante
-            student_clean = _cn(student_str).replace(":", "/").rstrip(",")
-            student_val = _safe_eval(student_clean)
-            is_correct = (
-                student_val is not None and abs(student_val - correct_val) < 0.05
-            )
 
-            # Determinar subtipo
-            has_frac = bool(FRAC_EXPR_RE.search(left_str))
+            has_frac  = bool(FRAC_RE.search(left_str))
             has_paren = "(" in left_str
-            has_dot = "." in left_str and not has_frac
-
-            if has_paren:
-                sub = "HIERARCHY"
-            elif has_frac:
-                sub = "FRACTION"
-            elif has_dot:
-                sub = "DECIMAL"
-            elif re.search(r"[*×xX]", left_str):
-                sub = "*"
-            elif re.search(r"[/÷]", left_str):
-                sub = "/"
-            elif re.search(r"-", expr_clean.lstrip("-")):
-                sub = "-"
-            else:
-                sub = "+"
-
-            add({"originalText": original_line,
-                 "operation": left_str,
-                 "studentAnswer": student_str or "-",
-                 "correctAnswer": cs,
-                 "isCorrect": is_correct,
-                 "type": "arithmetic", "subType": sub})
-            text_buffer = ""
-            parsed = True
-            break
+            has_dot   = "." in left_str and not has_frac
+            left_clean = left_str.replace(" ", "")
+            if has_paren:                                    sub = "HIERARCHY"
+            elif has_frac:                                   sub = "FRACTION"
+            elif has_dot:                                    sub = "DECIMAL"
+            elif re.search(r"[*×xX]", left_str):            sub = "*"
+            elif re.search(r"[/÷]", left_str) and not re.search(r"-", left_clean): sub = "/"
+            elif re.search(r"-", left_clean.lstrip("-")):    sub = "-"
+            else:                                            sub = "+"
+            add({"originalText": original_line, "operation": left_str,
+                 "studentAnswer": student_str or "-", "correctAnswer": cs,
+                 "isCorrect": is_correct, "type": "arithmetic", "subType": sub})
+            text_buffer = ""; parsed = True; break
 
         if not parsed and len(line) > 4 and re.search(r"[a-zA-ZáéíóúÁÉÍÓÚ]", line):
             text_buffer += line + " "
@@ -506,9 +578,7 @@ def detect_math_problems(ocr_text: str) -> List[Dict[str, Any]]:
     return results[:100]
 
 
-# ─── CALIFICACIÓN ─────────────────────────────────────────────────────────────
 def calculate_final_score(problems: List[Dict]) -> float:
-    """Escala colombiana 1.0 – 5.0."""
     definitive = [p for p in problems if p.get("isCorrect") is not None]
     if not definitive:
         return 1.0
@@ -516,33 +586,24 @@ def calculate_final_score(problems: List[Dict]) -> float:
     return round(min(5.0, max(1.0, 1.0 + (correct / len(definitive)) * 4.0)), 1)
 
 
-# ─── PLAN PEDAGÓGICO ──────────────────────────────────────────────────────────
 def generate_teaching_plan(problems: List[Dict]) -> str:
     errors = [p for p in problems if p.get("isCorrect") is False]
     if not errors:
-        return (
-            "🌟 ¡Excelente trabajo! El estudiante domina todos los temas.\n"
-            "✅ Sugerencia: ejercicios de ampliación y retos adicionales."
-        )
-
-    seen: set = set()
-    parts: List[str] = []
+        return ("🌟 ¡Excelente trabajo! El estudiante domina todos los temas.\n"
+                "✅ Sugerencia: ejercicios de ampliación y retos adicionales.")
+    seen: set = set(); parts: List[str] = []
     names = {
         "+": "Suma", "-": "Resta", "*": "Multiplicación", "/": "División",
         "FRACTION": "Fracciones", "HIERARCHY": "Jerarquía de Operaciones",
         ">": "Mayor que", "<": "Menor que", "=": "Igualdad", "VF": "Verdadero/Falso",
-        "POTENCIA": "Potencias", "RAIZ": "Raíces Cuadradas",
-        "FACTOR": "Factorización", "UNIDADES": "Unidades de Medida",
-        "TEXTO": "Problemas de Texto", "DECIMAL": "Decimales",
+        "POTENCIA": "Potencias", "RAIZ": "Raíces Cuadradas", "FACTOR": "Factorización",
+        "UNIDADES": "Unidades de Medida", "TEXTO": "Problemas de Texto", "DECIMAL": "Decimales",
     }
     pfx = {
-        "FRACTION": "🧱", "HIERARCHY": "🧱",
-        "POTENCIA": "⚡", "RAIZ": "⚡", "FACTOR": "⚡",
-        "UNIDADES": "📏", "TEXTO": "📖",
-        ">": "🐊", "<": "🐊", "=": "🐊", "VF": "🐊",
-        "DECIMAL": "🔢",
+        "FRACTION": "🧱", "HIERARCHY": "🧱", "POTENCIA": "⚡", "RAIZ": "⚡",
+        "FACTOR": "⚡", "UNIDADES": "📏", "TEXTO": "📖",
+        ">": "🐊", "<": "🐊", "=": "🐊", "VF": "🐊", "DECIMAL": "🔢",
     }
-
     for err in errors:
         sub = err.get("subType", "+")
         if re.search(r"\b(km|cm|metros|litros|kg|g)\b",
@@ -552,11 +613,9 @@ def generate_teaching_plan(problems: List[Dict]) -> str:
             continue
         seen.add(sub)
         tips = PEDAGOGIA.get(sub) or PEDAGOGIA["+"]
-        name = names.get(sub, sub)
-        op = (err.get("operation") or "")[:40]
         parts.append(
-            f"{pfx.get(sub, '🔢')} **{name}** (ej: {op}):\n"
+            f"{pfx.get(sub, '🔢')} **{names.get(sub, sub)}** "
+            f"(ej: {(err.get('operation') or '')[:40]}):\n"
             + "\n".join(tips[:3])
         )
-
     return "\n\n".join(parts)

@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: emai-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: emai-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_ORIGINS
+        value: "https://emai-backend.onrender.com"
+      - key: OCR_LANG
+        value: "spa+eng"
+
+databases:
+  - name: emai-db
+    plan: free
+    databaseName: emai_db

@@ -14,8 +14,8 @@ from ..services.ocr_service import (
     extract_text_from_images,
     detect_math_problems,
     calculate_final_score,
-    generate_teaching_plan,
 )
+from ..services.pedagogy_service import generate_plan_with_model
 
 router = APIRouter(prefix="/docente", tags=["docente"])
 require_docente = require_role(UserRoleEnum.docente)
@@ -220,7 +220,6 @@ async def create_student(
     # Crear exam_results pendientes para exámenes ya existentes en el curso
     exams = db.query(Exam).filter(
         Exam.course_id == course_id,
-        Exam.teacher_id == current_user.id,
     ).all()
     for exam in exams:
         exists = db.query(ExamResult).filter(
@@ -393,7 +392,6 @@ def list_course_exams(
     """Lista todos los exámenes de un curso."""
     exams = db.query(Exam).filter(
         Exam.course_id == course_id,
-        Exam.teacher_id == current_user.id,
     ).order_by(Exam.created_at.desc()).all()
     return [
         {
@@ -489,6 +487,12 @@ async def scan_exam(
         db.refresh(result)
     else:
         result.status = ExamStatusEnum.processing
+        result.ocr_raw_text = None
+        result.problems_json = "[]"
+        result.final_score = None
+        result.grade_color = None
+        result.teacher_notes = None
+        result.image_urls = json.dumps([])
         db.commit()
 
     result_id = result.id
@@ -527,13 +531,7 @@ def _process_ocr_background(result_id: str, images: list):
         result.final_score = score
         result.grade_color = "green" if score >= PASSING_GRADE else "red"
 
-        # 4. Plan pedagógico (generateTeachingPlanLogic del backend viejo)
-        plan = generate_teaching_plan(problems)
-
-        # 5. Guardar plan en teacher_notes con separador
-        result.teacher_notes = f"---PLAN---\n{plan}"
-
-        # 6. Guardar URLs de imágenes (marcadores — en prod serían paths reales)
+        # 4. Guardar URLs de imágenes
         result.image_urls = json.dumps([
             f"result_{result_id}_img{i}" for i in range(len(images))
         ])
@@ -560,6 +558,34 @@ def get_exam_result(
     result = db.query(ExamResult).filter(ExamResult.id == result_id).first()
     if not result:
         raise HTTPException(status_code=404, detail="Resultado no encontrado")
+    exam = db.query(Exam).filter(Exam.id == result.exam_id).first()
+    return _result_to_dict(result, exam.name if exam else "")
+
+
+# ─── GENERAR PLAN PEDAGÓGICO ──────────────────────────────────────────────────
+@router.post("/examenes/resultados/{result_id}/generar-plan")
+def generar_plan_pedagogico(
+    result_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_docente),
+):
+    """Genera el plan pedagógico con el modelo T5 para un resultado ya calificado."""
+    result = db.query(ExamResult).filter(ExamResult.id == result_id).first()
+    if not result:
+        raise HTTPException(status_code=404, detail="Resultado no encontrado")
+
+    problems = json.loads(result.problems_json or "[]")
+    plan = generate_plan_with_model(problems)
+
+    existing_notes = ""
+    if result.teacher_notes and "---PLAN---" in result.teacher_notes:
+        existing_notes = result.teacher_notes.split("---PLAN---", 1)[0].strip()
+    elif result.teacher_notes:
+        existing_notes = result.teacher_notes.strip()
+
+    result.teacher_notes = f"{existing_notes}---PLAN---\n{plan}" if existing_notes else f"---PLAN---\n{plan}"
+    db.commit()
+    db.refresh(result)
     exam = db.query(Exam).filter(Exam.id == result.exam_id).first()
     return _result_to_dict(result, exam.name if exam else "")
 
@@ -591,12 +617,16 @@ async def update_exam_result(
         result.final_score = float(final_score)
         result.grade_color = "green" if float(final_score) >= PASSING_GRADE else "red"
 
-    # Regenerar plan pedagógico con problemas actualizados
-    probs = problems or json.loads(result.problems_json or "[]")
-    new_plan = generate_teaching_plan(probs)
+    # Preservar el plan pedagógico existente si ya fue generado
+    existing_plan = ""
+    if result.teacher_notes and "---PLAN---" in result.teacher_notes:
+        existing_plan = result.teacher_notes.split("---PLAN---", 1)[1].strip()
 
-    # Guardar notas del docente + plan con separador
-    result.teacher_notes = f"{teacher_notes}---PLAN---\n{new_plan}"
+    if existing_plan:
+        result.teacher_notes = f"{teacher_notes}---PLAN---\n{existing_plan}"
+    else:
+        result.teacher_notes = teacher_notes
+
     result.status = ExamStatusEnum.graded
 
     db.commit()
@@ -684,7 +714,7 @@ def export_course_grades(
         raise HTTPException(status_code=404, detail="Curso no encontrado")
 
     students = db.query(Student).filter(Student.course_id == course_id).order_by(Student.full_name).all()
-    exams = db.query(Exam).filter(Exam.course_id == course_id, Exam.teacher_id == current_user.id).order_by(Exam.created_at).all()
+    exams = db.query(Exam).filter(Exam.course_id == course_id).order_by(Exam.created_at).all()
 
     rows = []
     for student in students:
@@ -736,7 +766,6 @@ def export_course_xlsx(
 
     exams = db.query(Exam).filter(
         Exam.course_id == course_id,
-        Exam.teacher_id == current_user.id,
     ).order_by(Exam.created_at).all()
 
     wb = Workbook()

@@ -17,7 +17,8 @@ API REST en Python + FastAPI para el sistema de seguimiento de exámenes.
 ### 1. Clonar e instalar dependencias
 
 ```bash
-# Crear entorno virtual
+
+# 1. Crear entorno virtual
 python -m venv venv
 source venv/bin/activate        # macOS/Linux
 venv\Scripts\activate           # Windows

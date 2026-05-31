@@ -5,7 +5,6 @@ from sqlalchemy import (
     ForeignKey, Text, Integer, Enum as SAEnum
 )
 from sqlalchemy.orm import relationship, DeclarativeBase
-from sqlalchemy.dialects.mysql import CHAR
 import enum
 
 
@@ -47,14 +46,14 @@ class ExamStatusEnum(str, enum.Enum):
 class Institution(Base):
     __tablename__ = "institutions"
 
-    id = Column(CHAR(36), primary_key=True, default=new_uuid)
+    id = Column(String(36), primary_key=True, default=new_uuid)
     name = Column(String(200), nullable=False)
     primary_color = Column(String(7), default="#1A3C5E")
     secondary_color = Column(String(7), default="#2E6DA4")
     logo_url = Column(String(500), nullable=True)
     data_terms_accepted = Column(Boolean, default=False)
     data_terms_accepted_at = Column(DateTime, nullable=True)
-    data_terms_accepted_by = Column(CHAR(36), nullable=True)
+    data_terms_accepted_by = Column(String(36), nullable=True)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
 
@@ -72,14 +71,14 @@ class Institution(Base):
 class AccessToken(Base):
     __tablename__ = "access_tokens"
 
-    id = Column(CHAR(36), primary_key=True, default=new_uuid)
+    id = Column(String(36), primary_key=True, default=new_uuid)
     token = Column(String(30), unique=True, nullable=False, index=True)
     institution_name = Column(String(200), nullable=True)
-    institution_id = Column(CHAR(36), ForeignKey("institutions.id"), nullable=True)
+    institution_id = Column(String(36), ForeignKey("institutions.id"), nullable=True)
     used = Column(Boolean, default=False)
     used_at = Column(DateTime, nullable=True)
-    used_by = Column(CHAR(36), nullable=True)
-    created_by = Column(CHAR(36), ForeignKey("users.id"), nullable=False)
+    used_by = Column(String(36), nullable=True)
+    created_by = Column(String(36), ForeignKey("users.id"), nullable=False)
     expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=now)
 
@@ -91,15 +90,15 @@ class AccessToken(Base):
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(CHAR(36), primary_key=True, default=new_uuid)
+    id = Column(String(36), primary_key=True, default=new_uuid)
     username = Column(String(80), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(200), nullable=False)
     role = Column(SAEnum(UserRoleEnum), nullable=False)
     sub_role = Column(SAEnum(DirectivoSubRoleEnum), nullable=True)
     photo_url = Column(String(500), nullable=True)
-    institution_id = Column(CHAR(36), ForeignKey("institutions.id"), nullable=True)
-    course_id = Column(CHAR(36), ForeignKey("courses.id"), nullable=True)
+    institution_id = Column(String(36), ForeignKey("institutions.id"), nullable=True)
+    course_id = Column(String(36), ForeignKey("courses.id"), nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
@@ -114,12 +113,12 @@ class User(Base):
 class Course(Base):
     __tablename__ = "courses"
 
-    id = Column(CHAR(36), primary_key=True, default=new_uuid)
+    id = Column(String(36), primary_key=True, default=new_uuid)
     name = Column(String(20), nullable=False)
     grade = Column(String(10), nullable=False)
     group = Column(String(10), nullable=False)
-    institution_id = Column(CHAR(36), ForeignKey("institutions.id"), nullable=False)
-    teacher_id = Column(CHAR(36), ForeignKey("users.id"), nullable=True)
+    institution_id = Column(String(36), ForeignKey("institutions.id"), nullable=False)
+    teacher_id = Column(String(36), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=now)
 
     institution = relationship("Institution", back_populates="courses")
@@ -132,11 +131,11 @@ class Course(Base):
 class Subject(Base):
     __tablename__ = "subjects"
 
-    id = Column(CHAR(36), primary_key=True, default=new_uuid)
+    id = Column(String(36), primary_key=True, default=new_uuid)
     name = Column(String(100), nullable=False)
     base_type = Column(String(30), default="matematicas")
-    institution_id = Column(CHAR(36), ForeignKey("institutions.id"), nullable=False)
-    course_id = Column(CHAR(36), nullable=True)
+    institution_id = Column(String(36), ForeignKey("institutions.id"), nullable=False)
+    course_id = Column(String(36), nullable=True)
     created_at = Column(DateTime, default=now)
 
     institution = relationship("Institution", back_populates="subjects")
@@ -147,12 +146,12 @@ class Subject(Base):
 class Student(Base):
     __tablename__ = "students"
 
-    id = Column(CHAR(36), primary_key=True, default=new_uuid)
+    id = Column(String(36), primary_key=True, default=new_uuid)
     full_name = Column(String(200), nullable=False)
     photo_url = Column(String(500), nullable=True)
-    course_id = Column(CHAR(36), ForeignKey("courses.id"), nullable=False)
-    institution_id = Column(CHAR(36), ForeignKey("institutions.id"), nullable=False)
-    created_by_id = Column(CHAR(36), ForeignKey("users.id"), nullable=False)
+    course_id = Column(String(36), ForeignKey("courses.id"), nullable=False)
+    institution_id = Column(String(36), ForeignKey("institutions.id"), nullable=False)
+    created_by_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
 
@@ -166,12 +165,12 @@ class Student(Base):
 class Exam(Base):
     __tablename__ = "exams"
 
-    id = Column(CHAR(36), primary_key=True, default=new_uuid)
+    id = Column(String(36), primary_key=True, default=new_uuid)
     name = Column(String(300), nullable=False)
-    course_id = Column(CHAR(36), ForeignKey("courses.id"), nullable=False)
-    subject_id = Column(CHAR(36), ForeignKey("subjects.id"), nullable=True)
-    teacher_id = Column(CHAR(36), ForeignKey("users.id"), nullable=False)
-    institution_id = Column(CHAR(36), ForeignKey("institutions.id"), nullable=False)
+    course_id = Column(String(36), ForeignKey("courses.id"), nullable=False)
+    subject_id = Column(String(36), ForeignKey("subjects.id"), nullable=True)
+    teacher_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    institution_id = Column(String(36), ForeignKey("institutions.id"), nullable=False)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
 
@@ -186,9 +185,9 @@ class Exam(Base):
 class ExamResult(Base):
     __tablename__ = "exam_results"
 
-    id = Column(CHAR(36), primary_key=True, default=new_uuid)
-    exam_id = Column(CHAR(36), ForeignKey("exams.id"), nullable=False)
-    student_id = Column(CHAR(36), ForeignKey("students.id"), nullable=False)
+    id = Column(String(36), primary_key=True, default=new_uuid)
+    exam_id = Column(String(36), ForeignKey("exams.id"), nullable=False)
+    student_id = Column(String(36), ForeignKey("students.id"), nullable=False)
     image_urls = Column(Text, nullable=True)          # JSON lista de URLs
     ocr_raw_text = Column(Text, nullable=True)
     problems_json = Column(Text, nullable=True)        # JSON lista de problemas
@@ -207,11 +206,11 @@ class ExamResult(Base):
 class SupportMessage(Base):
     __tablename__ = "support_messages"
 
-    id = Column(CHAR(36), primary_key=True, default=new_uuid)
-    from_user_id = Column(CHAR(36), ForeignKey("users.id"), nullable=False)
+    id = Column(String(36), primary_key=True, default=new_uuid)
+    from_user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     from_username = Column(String(80), nullable=False)
     from_role = Column(String(20), nullable=False)
-    institution_id = Column(CHAR(36), ForeignKey("institutions.id"), nullable=True)
+    institution_id = Column(String(36), ForeignKey("institutions.id"), nullable=True)
     message = Column(Text, nullable=False)
     read = Column(Boolean, default=False)
     created_at = Column(DateTime, default=now)

@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # Base de datos
-    DATABASE_URL: str = "mysql+pymysql://root:password@localhost:3306/emai_db"
+    DATABASE_URL: str = "postgresql+psycopg2://postgres:password@localhost:5432/emai_db"
 
     # JWT
     SECRET_KEY: str = "cambia_esta_clave_en_produccion"
