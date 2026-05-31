@@ -32,6 +32,13 @@ build/
 *.log
 logs/
 
+# ─── Modelos de IA (archivos binarios grandes) ───────────────────────────────
+pedagogy_model/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
 # ─── Archivos temporales de OCR / uploads ────────────────────────────────────
 uploads/
 tmp/
