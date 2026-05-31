@@ -36,6 +36,16 @@ async def lifespan(app: FastAPI):
         _seed_admin()
     except Exception as e:
         print(f"⚠ BD: {e}")
+    # Pre-cargar EasyOCR en background para que el primer escaneo no espere
+    import threading
+    def _warmup_ocr():
+        try:
+            from .services.ocr_service import _get_easyocr
+            _get_easyocr()
+            print("✓ EasyOCR modelo cargado y listo")
+        except Exception as e:
+            print(f"⚠ EasyOCR warmup: {e}")
+    threading.Thread(target=_warmup_ocr, daemon=True).start()
     print(f"✓ {settings.APP_NAME} v{settings.APP_VERSION} iniciado")
     yield
 
