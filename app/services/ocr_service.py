@@ -22,12 +22,28 @@ try:
 except ImportError:
     EASYOCR_AVAILABLE = False
 
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+
 _easyocr_reader = None
 def _get_easyocr():
     global _easyocr_reader
     if _easyocr_reader is None and EASYOCR_AVAILABLE:
         _easyocr_reader = easyocr.Reader(['es', 'en'], gpu=False, verbose=False)
     return _easyocr_reader
+
+
+def _tesseract_to_text(img: "Image.Image") -> str:
+    if not TESSERACT_AVAILABLE:
+        return ""
+    try:
+        config = "--oem 3 --psm 6 -l spa+eng"
+        return pytesseract.image_to_string(img, config=config)
+    except Exception:
+        return ""
 
 PEDAGOGIA: Dict[str, List[str]] = {
     "+":         ["🔢 Usa la recta numérica para visualizar la suma.", "🧮 Practica agrupando objetos concretos.", "🎯 Completa: 3+__=7."],
@@ -218,7 +234,7 @@ def _process_single_image(b64: str, index: int) -> str:
             pass
 
         reader = _get_easyocr()
-        if reader is None:
+        if reader is None and not TESSERACT_AVAILABLE:
             return f"=== PÁGINA {index+1} ===\n{_demo_text()}"
 
         # Escalar a máx 1200px para no agotar RAM
@@ -231,13 +247,15 @@ def _process_single_image(b64: str, index: int) -> str:
         gray = img.convert("L")
         gray = ImageEnhance.Sharpness(gray).enhance(2.0)
 
-        buf = io.BytesIO()
-        gray.save(buf, format="JPEG", quality=95)
+        if reader is not None:
+            buf = io.BytesIO()
+            gray.save(buf, format="JPEG", quality=95)
+            results = reader.readtext(buf.getvalue())
+            text = _easyocr_to_text(results)
+        else:
+            text = _tesseract_to_text(gray)
 
-        results = reader.readtext(buf.getvalue())
-        text = _easyocr_to_text(results)
         text = _normalize_vf(text)
-
         return f"=== PÁGINA {index+1} ===\n{_clean_text(text)}"
     except Exception as e:
         return f"=== PÁGINA {index+1} (error: {e}) ==="
