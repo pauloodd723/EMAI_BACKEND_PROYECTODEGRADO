@@ -3,15 +3,37 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from .config import settings
-from .database import engine
-from .models import Base
+from .database import engine, SessionLocal
+from .models import Base, User, UserRoleEnum
+from .security import hash_password
 from .routers import auth, admin, directivo, docente, soporte
+
+
+def _seed_admin():
+    db = SessionLocal()
+    try:
+        if not db.query(User).filter(User.role == UserRoleEnum.admin).first():
+            db.add(User(
+                username="admin",
+                password_hash=hash_password("Admin1234!"),
+                full_name="Administrador EMAI",
+                role=UserRoleEnum.admin,
+                is_active=True,
+            ))
+            db.commit()
+            print("✓ Usuario admin creado (admin / Admin1234!)")
+    except Exception as e:
+        print(f"⚠ Seed admin: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
         Base.metadata.create_all(bind=engine)
+        _seed_admin()
     except Exception as e:
         print(f"⚠ BD: {e}")
     print(f"✓ {settings.APP_NAME} v{settings.APP_VERSION} iniciado")
